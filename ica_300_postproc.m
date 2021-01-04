@@ -1,13 +1,10 @@
-%% ICA 300 post fmriprep processing
+%% ICA 300 post fmriprep processing function
 % Carlos Rodriguez, Ph.D. 
-% This script was created for the ica_300 project to unzip the best of 4 
+% This function was created for the ica_300 project to unzip the best of 4 
 % runs of resting state fmri from 300 participants of the ABCD study.
 % Voxelwise timecourses are detrended using gift icatb_detren
 % Motion parameters are then regressed out of the voxelwise timecourses
-% using gift icatb_regress.
-%
-% This script requires the ica_300_fmriprep_qa.csv file to determine which 
-% 4 runs to unzip in cases where more than 4 runs of rsfMRI exist. 
+% using gift icatb_regress. 
 %
 % Dependencies include Gift ICA toolbox, SPM12, and AFNI set up to work
 % through bash. Matlab parallel pool for smoothing multiple subjects at 
@@ -22,10 +19,19 @@
 % code to run from subjects 2 through 8 in testing.
 %   check timepoints after regression
 %   check slices in 3dDespike
-% 01/04/21 - fixed .tsv files
-%   - changed AFNI settings
-%   - set smoothing per subject
-%   
+% 01/04/21 - Modified reading of .tsv files to use readtable instead of
+% tdfread which speeds up the process, but still requires conversion of
+% 'n/a's to double. Set AFNI 3dDespike prefix to include .nii to bypass the
+% .brik to .nii conversion step. Added -nomask and -ssave options. 
+% Smoothing set to run within each subject folder.
+%
+%
+% Modifications to make:
+% - convert to function, using the subject directory as input
+% - modify script to not require a subject loop
+% - modify script to perform QA on it's own with out qa_merge
+% - after w/ in subject QA, could try a batch process to perform detrend,
+% regression, despike, and smooth
 
 tic
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -50,6 +56,7 @@ batch = {}; %initialize empty cell
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% Loop through each subject in the qa merge file
+
 for ii = 2:size(runs_to_use, 1)
     % Initialize variables within each subject loop iteration
     % Initialize subject
@@ -109,38 +116,67 @@ for ii = 2:size(runs_to_use, 1)
     % for each rs fmri file that has been unzipped
     for kk = 1:size(rs_files, 1) % 1 through size rs_files along the 1st dim
         run = rs_files(kk).name(strfind(rs_files(kk).name, 'run'):strfind(rs_files(kk).name, 'run')+4); %identifies which run
-
+        
+%         Older code using tdfread. Takes a bit longer than using readtable.        
+%         tic
+%         % load corresponding confounds_regressors.tsv file
+%         temp_tsv = tdfread(cons(kk).name, '\t'); %n.b. Some data types will be in char, results in struct
+%         
+%         % Prep the tsv file, replace with 1st cell nan with zeros, select only the columns
+%         % needed for motion regression
+%         
+%         %Create index of fields that need conversion of char to num using OR operators
+%         names = fieldnames(temp_tsv); %list out the field names
+%         
+%         %prep the derivative columns because they have nans in the first
+%         %field and are in character instead of num format
+%         cols = contains(names,'derivative'); %Index of all of the derivative measures
+%         col_names = names(cols); %Cell that contains indexed field names
+%             
+%         %Convert char to num and replace initial nan cells with 0
+%         for ll = 1:size(col_names,1)
+%             temp_tsv.(col_names{ll})(1,:) = '0'; %[]; %Delete the first cell that contains the n/a of derivatives
+%             temp_tsv.(col_names{ll}) = str2num(temp_tsv.(col_names{ll})); %Converts char to num. n.b. str2double did not work properly
+%             %temp_tsv.(col_names{ll}) = [0; temp_tsv.(col_names{ll})]; % concatenates zero with the rest of the values %[mean(c.(names_ind{i})(1:end)); c.(names_ind{i})]; %Concatenates the average and remaining data
+%         end
+%         toc
+        
+        %% Insertion Point for readtable of .tsv files
+        tic
+        
         % load corresponding confounds_regressors.tsv file
-        temp_tsv = tdfread(cons(kk).name, '\t'); %n.b. Some data types will be in char
+        temp_tsv = readtable(cons(kk).name, 'Filetype', 'text');  % reads the .tsv files, but still results in processing
         
         % Prep the tsv file, replace with 1st cell nan with zeros, select only the columns
         % needed for motion regression
         
         %Create index of fields that need conversion of char to num using OR operators
         names = fieldnames(temp_tsv); %list out the field names
-        
-        %prep the derivative columns because they have nans in the first
+
+        %prep the derivative columns because they have 'n/a's in the first
         %field and are in character instead of num format
         cols = contains(names,'derivative'); %Index of all of the derivative measures
         col_names = names(cols); %Cell that contains indexed field names
-            
-        %Convert char to num and replace initial nan cells with 0
+
+        %Replace initial 'n/a's with 0 and convert char to double and 
         for ll = 1:size(col_names,1)
-            temp_tsv.(col_names{ll})(1,:) = []; %Delete the first cell that contains the n/a of derivatives
-            temp_tsv.(col_names{ll}) = str2num(temp_tsv.(col_names{ll})); %Converts char to num. n.b. str2double did not work properly
-            temp_tsv.(col_names{ll}) = [0; temp_tsv.(col_names{ll})]; % concatenates zero with the rest of the values %[mean(c.(names_ind{i})(1:end)); c.(names_ind{i})]; %Concatenates the average and remaining data
+            temp_tsv.(col_names{ll})(1,:) = {'0'}; %replace 'n/a's wit zero char
+            temp_tsv.(col_names{ll}) = str2double(temp_tsv.(col_names{ll})); %Converts char to double
         end
+        toc
         
+        %% 
         % Gather the prepped motion parameters for motion regression
         cols = contains(names,'trans') | contains(names, 'rot'); % index of trans and rot motion parameters
         col_names = names(cols); %Cell that contains indexed field names
     
         %Convert struct to table for preparing regressor design matrix X
-        regressors = struct2table(temp_tsv); %Convert structure to table
+        %regressors = struct2table(temp_tsv); %Convert structure to table
         clear temp_tsv %clear temp_tsv from memory
         
         % Regression design matrix
-        rX = regressors(:, col_names); %selects the column names from regressors
+        rX = temp_tsv(:, col_names);
+        %rX = regressors(:, col_names); %selects the column names from regressors, used in older temp_tsv code section
         rX = rX{:,:}; % selects only the values and not variable names for regression
         
         % load the volume with SPM12
@@ -181,7 +217,8 @@ for ii = 2:size(runs_to_use, 1)
                
         % Merge 3d files to one 4d file %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
             % Could test fslmerge, but will leave files gzipped. Will need to
-            % unzip or change environmental variable from NIFT_GZ to NIFTI
+            % unzip or figure out how to change the fsl environmental variable 
+            % from NIFT_GZ to NIFTI
             % command = ['fslmerge -t r_' volname ' temp_*.nii -tr .8'];
             % system(command)
             % delete temp_*.nii;
@@ -201,18 +238,23 @@ for ii = 2:size(runs_to_use, 1)
         % for each file that has been motion regressed
         % perform the 3d Despike
         disp(['Performing despiking for ' run '.'])
-        command = ['3dDespike -prefix d r_' volname];
+%%%        %command = ['3dDespike -prefix dr_' volname ' -nomask -ssave
+        %spike_' volname ' r_' volname]; % to be deployed when fully
+        %test
+        command = ['3dDespike -prefix dr_' volname ' -nomask r_' volname]; %doesn't save spike data while testing
+
         system(command)
         delete r_*.nii;
 
-        % Convert AFNI .brik & .head to .nii %%%%%%%%%%%%%%%%%%%%%%%%%%%%
-        disp(['Converting to NIFTI for ' run '.'])
-        command = ['3dAFNItoNIFTI -prefix dr_' volname ' d+orig.BRIK'];
-        system(command)
-        delete d+*;
+%         % Convert AFNI .brik & .head to .nii %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%         disp(['Converting to NIFTI for ' run '.'])
+%         command = ['3dAFNItoNIFTI -prefix dr_' volname ' d+orig.BRIK'];
+%         system(command)
+%         delete d+*;
+
     end %ends the loop for each resting state fmri run
         
-    %% Set up parallel for loop for smoothing with SPM12 and 6mm FWHM
+    % Set up parallel for loop for smoothing with SPM12 and 6mm FWHM %%%%%%
     disp('Setting up parallel loop batch for smoothing.')
     dr_files = dir('dr*.nii'); %list the despiked and regressed files
     for kk = 1:size(dr_files, 1)
@@ -231,43 +273,20 @@ for ii = 2:size(runs_to_use, 1)
         batch = [batch subj_batch]; %appends to a growing list of batches
     end
     
-    % Move back to the root directory to continue going through subjects
+    % Smoothing in parallel %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    disp('Proceeding to smoothing.')
+    parfor xx = 1:size(batch,2)
+         try
+                out{xx} = spm_jobman('run',batch{xx})
+         catch
+                 out{xx} = 'failed';
+          end
+    end
+   
+    % Move back to the root directory %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     cd(rdr)
 
 end %ends the loop for each subject
 
 disp('Post-processing finished in ...')
 toc
-
-disp('Proceeding to smoothing.')
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% Parallel Loop for Smoothing
-parfor xx = 1:size(batch,2)
-     try
-            out{xx} = spm_jobman('run',batch{xx})
-     catch
-             out{xx} = 'failed';
-      end
-end
-
-%% Create a list of files to use in ica
-% ica_files = {};
-% for ii = 1:size(runs_to_use, 1)
-%     
-%     % Initialize subject
-%     subj = runs_to_use.bids_id{ii};
-%     
-%     % Change into the subject directory
-%     cd([subj '/ses-baselineYear1Arm1/func']); % uses relative path, not absolute
-%     
-%     % List all of rest fmri zipped files
-%     sfiles = dir('sdr*.nii'); %lists the rest fmri files
-%     
-%     % Concatenate to get an absolute path name
-%     abs_path = [rdr '/' subj '/ses-baselineYear1Arm1/func/' sfiles.name];
-%     ica_files = vertcat(ica_files, abs_path);
-% 
-%     cd(rdr)
-% end
-
-%%
