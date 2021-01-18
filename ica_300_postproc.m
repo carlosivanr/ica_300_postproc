@@ -4,10 +4,9 @@ function [subj_dir_path] = ica_300_postproc(subj_dir_path)
 % Carlos Rodriguez, Ph.D. 
 % This function was created for the ica_300 project to unzip the best of 4 
 % runs of resting state fmri from 300 participants of the ABCD study.
-% Voxelwise timecourses are detrended using gift icatb_detren
-% Motion parameters are then regressed out of the voxelwise timecourses
-% using gift icatb_regress. 
-%
+% Motion parameters are regressed out of the voxelwise timecourses,
+% residual time courses are then despiked and smoothed.
+% 
 % Dependencies include: AFNI version 20.2.02
 % Set AFNI_AUTOGZIP = NO in .afnirc. 
 % Matlab parallel pool for despiking and smoothing multiple subjects at once.
@@ -52,21 +51,31 @@ function [subj_dir_path] = ica_300_postproc(subj_dir_path)
 % 01/12/21 - Replaced icatb and SPM functions with AFNI routines. Added 
 % code to unzip mask files to use in AFNI routines.
 
-% Possible modifications to make:
+%% Possible modifications to make:
 % - add session input argument, in case there will be session 2 data to
 % process
 % - add error log output argument for directing where to save files
-% - parfor loop for unzipping files
 
 %% Code section for testing %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 % subjects = dir('sub-NDAR*'); %list all of the files and folders that begin with sub-* prefix
 % subjects = subjects([subjects.isdir]); %modify list to contain only directories
 % subj_dir_path  = [subjects(7).folder filesep subjects(7).name]; %set subj_dir_path to subject
 
-%% Set environmental variables
+%% Set environmental variables and check AFNI Version
 tic
 setenv('PATH', [getenv('PATH') ':/export/research/analysis/human/jhouck/shared/tools/abin_20202']); %Set AFNI Version by appending to the path
 setenv('OMP_NUM_THREADS', '16'); %Set # of openmp threads
+
+% Check AFNI Version
+[~, ver] = system('afni -ver');
+disp(ver)
+ver_num = str2num(ver(58+5:58+6)); %numeric of the first two digits of the AFNI version number
+if ver_num >= 20
+    disp('AFNI version set correctly set.')
+else
+    disp('Error: AFNI Version 20.2.02 or higher required. Exiting..')
+    return
+end
 
 %% Verify directories, files, and errors %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 ses = 'ses-baselineYear1Arm1';
@@ -138,12 +147,13 @@ clear status
 
 %% Conditional statement to proceed if func directory exists, at least 4 rs-fMRI runs exist, and no error reported by fmriprep
 if contains(cmdout, 'No errors')
+
     % Change directory to ica_300 fmriprep output directory
     cd([subj_dir_path filesep ses filesep 'func']);%
 
-    % Testing mode, clears files
-    disp('Testing mode: Clearing files before processing.')
-    delete sdr_*.nii; delete dr_*.nii; delete r_*.nii; delete tcat_*.nii; delete stats_*.nii; delete fitts_*.nii; delete X_sub*.xmat.1D;
+    % Testing mode, deletes files before processing
+    %disp('Testing mode: Clearing files before processing.')
+    %delete sdr_*.nii; delete dr_*.nii; delete r_*.nii; delete tcat_*.nii; delete stats_*.nii; delete fitts_*.nii; delete X_sub*.xmat.1D;
     
     % QC number of runs, timepoints, and number of motion outliers
     % %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -160,14 +170,13 @@ if contains(cmdout, 'No errors')
         end
         run_info = [1:size(tsv_files,1); num_timepoints; num_outliers]'; % Create a matrix with the run_info
         T = array2table(run_info);  % Write run info to a .csv file as part of logging information regarding file processing
-        T.Properties.VariableNames = {'run', 'timepoints', 'num_outliers'};
+        T.Properties.VariableNames = {'run', 'timepoints', 'motion_outliers'};
         writetable(T, [subj '_run_info.csv']); %writes out a table with run diagnostics
         disp(T); clear T
         run_info(run_info(:, 2) ~= 383, :) = [] ; %deletes any rows with timepoints not equal to 383.
     end
     
-    % If remaining runs with 383 timepoints are less than 4, exit out of
-    % the function and write to error log
+    % If remaining runs with 383 timepoints are less than 4, exit out of the function and write to error log
     if size(run_info, 1) < 4
         disp('Not enough runs to process. Number of timepoints may be less than expected. Exiting ica_300_postproc.')
         log_msg = [subj ', Not of enough runs to process. Number of timepoints may be less than expected.'];
@@ -181,9 +190,9 @@ if contains(cmdout, 'No errors')
         runs_to_use = sort(runs_to_use); %sort runs_to_use to reflect run acquisition
         disp(['Using runs ' num2str(runs_to_use(1)) ', ' num2str(runs_to_use(2)) ', ' num2str(runs_to_use(3)) ', and ' num2str(runs_to_use(4)) '.'])
     end
-    clear run_info num_time_points num_outliers
-
-    % Unzip resting state files %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    
+    % Unzip resting state files
+    % %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
     for jj = 1:4 %this loop uses runs_to_use as an index to unzip files
         filezp = rs_runs(runs_to_use(jj)).name;
         fileun = filezp(1:end-3); %
@@ -210,9 +219,11 @@ if contains(cmdout, 'No errors')
         end
     end     
     
-    % Regression of motion (performed in serial)
+    clear run_info num_timepoints num_outliers ntp mot fileun filezp rs_runs masks
+    
+    % Post fmriprep processing: file truncation, motion regression, despiking, and smoothing
     % %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-    disp('Performing regression of voxelwise timecourses.')
+    disp('Performing post fmriprep processing.')
     
     % Initialize empty cells for file checking
     reg_files = cell(4,1);
@@ -223,8 +234,8 @@ if contains(cmdout, 'No errors')
     tic; 
     for kk = 1:4
         run = ['run-' num2str(runs_to_use(kk))]; %identifies which run is processing
-        file_name = [subj '_' ses '_task-rest_' run '_space-MNIPediatricAsym_cohort-3_res-2_desc-preproc_bold_brain.nii']; %file name to detrend & regress
-        mask_file = [subj '_' ses '_task-rest_' run '_space-MNIPediatricAsym_cohort-3_res-2_desc-brain_mask.nii'];%
+        file_name = [subj '_' ses '_task-rest_' run '_space-MNIPediatricAsym_cohort-3_res-2_desc-preproc_bold_brain.nii']; %rs-fmri file to concatenate
+        mask_file = [subj '_' ses '_task-rest_' run '_space-MNIPediatricAsym_cohort-3_res-2_desc-brain_mask.nii'];%mask file name
         tsv_file_name = [subj '_' ses '_task-rest_' run '_desc-confounds_regressors.tsv']; %concatenates a .tsv file name
         
         reg_files{kk,1} = ['r_' subj '_' ses '_task-rest_' run '_space-MNIPediatricAsym_cohort-3_res-2_desc-preproc_bold_brain.nii']; %initialize a cell for despiking regressed files
@@ -232,79 +243,41 @@ if contains(cmdout, 'No errors')
         sdr_files{kk,1} = ['sdr_' subj '_' ses '_task-rest_' run '_space-MNIPediatricAsym_cohort-3_res-2_desc-preproc_bold_brain.nii']; %initialize a cell for smoothing despiked files
         mask_files{kk,1} = mask_file; %initialize a cell for despiking
 
-        % check if files exists
-        if isfile(reg_files{kk})
-            disp([run ' has been regressed. Skipping...'])
+        % check if the final smoothed file exists
+        if isfile(sdr_files{kk})
+            disp([run ' final output exists. Skipping...'])
         else
-            disp([run ' has not been regressed. Extracting regressors and performing regression of motion parameters.'])
+            disp([subj ' ' run ' final output does not exist. Extracting regressors and performing regression of motion parameters.'])
             
-            % Motion Regression with 3dDeconvolve
+            % Set up a string variable for file output
             subj_run = [subj '_' run];
             
             % Prepare a 1d file with the motion regressors
             system(['1dcat ' tsv_file_name '''[trans_x..rot_z_derivative1_power2]''' ' | tail -n 375 > ' subj_run '_regressors.1d']); %selects the last 375 lines of fields trans_x through rot_z...
 
             % Concatenate timepoints 8 through 382
-            system(['3dTcat -prefix tcat_' subj_run '.nii ' file_name '''[8..382]''']); %8-382 corresponds to timepoints 9-383 in AFNI bc numbering starts at zero
+            system(['3dTcat -prefix tcat_' subj_run '.nii ' file_name '''[8..382]''']); %AFNI numbering starts at zero, therefore 8:382 corresponds to timepoints 9:383 
             
-            % Perform motion regression w/ AFNI
+            % Perform motion regression w/ AFNI 3dDeconvolve
             system(['3dDeconvolve -input tcat_' subj_run '.nii ',...
                 '-ortvec ' subj_run '_regressors.1d motion_' run ' ',...
                 '-polort 3 -float -num_stimts 0 ',...
                 '-fout -tout -x1D X_' subj_run '.xmat.1D ',...
+                '-xjpeg X_' subj_run '.jpg ',...
                 '-fitts fitts_' file_name ' ',...
                 '-errts r_' file_name ' -bucket stats_' file_name(1:end-4) ' ',...
                 '-mask ' mask_file]);
             
            % Perform despiking
+           disp('Performing despiking.')
            system(['3dDespike -NEW -nomask -prefix d' reg_files{kk} ' ' reg_files{kk}]); % add nomask and ssave options
 
            % Perform smoothing
+           disp('Performing smoothing.')
            system(['3dmerge -1blur_fwhm 6 -doall -prefix s' dr_files{kk} ' ' dr_files{kk}]);
-
-           %
            
         end
     end; toc %end of subject loop
-    
-%     %% Change OpenMP settings to not hog up so many cpus in parallel
-%     setenv('OMP_NUM_THREADS', '4'); %Set # of openmp threads for parallel
-% 
-%     %% Despike in parallel with AFNI %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%     tic
-%     disp('Performing despiking.')
-%     %check which of the reg files need to be despiked
-% %     for ll = 1:size(dr_files, 1) 
-% %         if isfile(dr_files(ll,1))
-% %             disp([subj ' run-' num2str(runs_to_use(ll)) ' already exists. Ommitting from despiking.'])
-% %             reg_files(ll) = []; %deletes the row from reg_files if the file already exists           
-% %         end
-% %     end
-%     
-%     parfor ii = 1:size(reg_files, 1)
-%         tic; system(['3dDespike -nomask -prefix d' reg_files{ii} ' ' reg_files{ii}]); toc% add nomask and ssave options
-%         tic; system(['3dDespike -NEW -nomask -prefix d' reg_files{ii} ' ' reg_files{ii}]); toc% add nomask and ssave options
-% 
-%         %system(['3dDespike -NEW -q -nomask -ssave spike_' reg_files{ii}  ' -prefix d' reg_files{ii} ' ' reg_files{ii}]);
-%     end
-%     toc
-%     
-%      %% Smoothing in parallel with AFNI, 6mm FWHM %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%     tic
-%     disp('Performing smoothing.')
-%     %check which of the dr files need to be smoothed
-% %     for ll = 1:size(sdr_files, 1) 
-% %         if isfile(sdr_files(ll,1))
-% %             disp([subj ' run-' num2str(runs_to_use(ll)) ' already exists. Ommitting from smoothing.'])
-% %             dr_files(ll) = []; %deletes the row from dr_files if the file already exists
-% %         end
-% %     end
-% 
-%     parfor ii = 1:size(dr_files, 1)
-%         system(['3dmerge -1blur_fwhm 6 -doall -prefix s' dr_files{ii} ' ' dr_files{ii}]);
-%         tic; system(['3dBlurToFWHM -quiet -FWHM 6 -prefix s' dr_files{ii} ' -mask ' mask_files{ii} ' -input ' dr_files{ii}]); toc; %alternative smoothing program
-%     end
-%     toc
     
     %% Intermediary file clean up temp files
 %     s_files = dir('sdr*.nii');
@@ -313,8 +286,10 @@ if contains(cmdout, 'No errors')
 %         delete dr_*.nii;
 %         delete r_*.nii;
 %         delete tcat_*.nii;
+%     else
+%         disp('Not all 
 %     end
-%     
+    
     %% Move back to the root directory
     cd(parent_dir_path)
     
