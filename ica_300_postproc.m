@@ -69,7 +69,7 @@ setenv('OMP_NUM_THREADS', '16'); %Set # of openmp threads
 % Check AFNI Version
 [~, ver] = system('afni -ver');
 disp(ver)
-ver_num = str2num(ver(58+5:58+6)); %numeric of the first two digits of the AFNI version number
+ver_num = str2double(ver(58+5:58+6)); %numeric of the first two digits of the AFNI version number
 if ver_num >= 20
     disp('AFNI version set correctly set.')
 else
