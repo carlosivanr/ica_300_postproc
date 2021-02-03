@@ -5,7 +5,7 @@
 #subjects hoping to catch any errors that may arise.
 
 # list the sub* directories, pipe through sed to remove the trailing slash then redirect to directories.txt
-ls -d sub*/ | sed 's/.$//' > directories.txt
+ls -d sub*/ | sed 's/.$//' > temp_directories.txt
 
 # begin for loop to process each of the sample subjects
 for subj in `cat ./directories.txt` ; do
@@ -14,4 +14,4 @@ for subj in `cat ./directories.txt` ; do
 done
 
 #remove the directories.txt file
-rm directories.txt
+rm temp_directories.txt
