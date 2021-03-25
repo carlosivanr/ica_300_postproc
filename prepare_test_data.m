@@ -7,7 +7,7 @@
 cd('/export/research/analysis/human/jhouck/abcd/ica_300/fmriprep_out/fmriprep')
 
 % List the subject folders
-subjects = dir('sub-*');
+subjects = dir('sub-NDARIN*');
 subjects = subjects([subjects.isdir]); %modify subjects to contain only directories
 
 %randomly select 10 subjects
